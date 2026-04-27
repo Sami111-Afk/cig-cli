@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import requests
+import subprocess
+import json
+from bs4 import BeautifulSoup
+
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
+TMDB_BASE = "https://api.themoviedb.org/3"
+
+
+def die(msg):
+    print(f"\033[31m[error]\033[0m {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def search_series(query):
+    if not TMDB_API_KEY:
+        die("TMDB_API_KEY not set. Export it or add it to ~/.cig.conf")
+    r = requests.get(
+        f"{TMDB_BASE}/search/tv",
+        params={"api_key": TMDB_API_KEY, "query": query, "language": "en-US"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json().get("results", [])
+
+
+def pick(options, label_fn, prompt="Pick: "):
+    for i, item in enumerate(options):
+        print(f"  \033[33m{i+1}\033[0m) {label_fn(item)}")
+    print()
+    try:
+        choice = int(input(prompt)) - 1
+        if 0 <= choice < len(options):
+            return options[choice]
+    except (ValueError, KeyboardInterrupt):
+        pass
+    die("Invalid choice")
+
+
+def get_seasons(tmdb_id):
+    r = requests.get(
+        f"{TMDB_BASE}/tv/{tmdb_id}",
+        params={"api_key": TMDB_API_KEY, "language": "en-US"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    data = r.json()
+    return [s for s in data.get("seasons", []) if s["season_number"] > 0]
+
+
+def get_episodes(tmdb_id, season_number):
+    r = requests.get(
+        f"{TMDB_BASE}/tv/{tmdb_id}/season/{season_number}",
+        params={"api_key": TMDB_API_KEY, "language": "en-US"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json().get("episodes", [])
+
+
+def extract_stream_url(tmdb_id, season, episode):
+    providers = [
+        f"https://vidsrc.to/embed/tv/{tmdb_id}/{season}/{episode}",
+        f"https://vidsrc.me/embed/tv?tmdb={tmdb_id}&season={season}&episode={episode}",
+    ]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+        "Referer": "https://vidsrc.to/",
+    }
+
+    for provider_url in providers:
+        print(f"\033[90m[cig] trying {provider_url}\033[0m")
+        try:
+            session = requests.Session()
+            r = session.get(provider_url, headers=headers, timeout=15)
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            # look for iframe src
+            for iframe in soup.find_all("iframe"):
+                src = iframe.get("src", "")
+                if src and ("embed" in src or "source" in src or "player" in src):
+                    if not src.startswith("http"):
+                        src = "https:" + src if src.startswith("//") else f"https://vidsrc.to{src}"
+                    print(f"\033[90m[cig] found embed: {src}\033[0m")
+                    stream = resolve_embed(src, session, headers)
+                    if stream:
+                        return stream
+
+            # try direct m3u8 in page source
+            for line in r.text.splitlines():
+                if ".m3u8" in line or ".mp4" in line:
+                    url = extract_url_from_line(line)
+                    if url:
+                        return url
+
+        except requests.RequestException as e:
+            print(f"\033[90m[cig] provider failed: {e}\033[0m")
+            continue
+
+    return None
+
+
+def resolve_embed(embed_url, session, headers):
+    try:
+        r = session.get(embed_url, headers={**headers, "Referer": embed_url}, timeout=15)
+        for line in r.text.splitlines():
+            if ".m3u8" in line or ".mp4" in line:
+                url = extract_url_from_line(line)
+                if url:
+                    return url
+    except Exception:
+        pass
+    return None
+
+
+def extract_url_from_line(line):
+    import re
+    patterns = [
+        r'https?://[^\s\'"<>]+\.m3u8[^\s\'"<>]*',
+        r'https?://[^\s\'"<>]+\.mp4[^\s\'"<>]*',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, line)
+        if match:
+            return match.group(0)
+    return None
+
+
+def play(url, title):
+    print(f"\n\033[32m[cig] playing:\033[0m {title}")
+    print(f"\033[90m[cig] url: {url}\033[0m\n")
+    cmd = [
+        "mpv",
+        "--force-media-title=" + title,
+        "--referrer=https://vidsrc.to/",
+        url,
+    ]
+    try:
+        subprocess.run(cmd)
+    except FileNotFoundError:
+        die("mpv not found. Install it: pacman -S mpv")
+
+
+def main():
+    print("\033[1m\033[36m cig-cli\033[0m — stream series in your terminal\n")
+
+    query = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else input("Search series: ").strip()
+    if not query:
+        die("No query provided")
+
+    print(f"\n\033[90m[cig] searching for '{query}'...\033[0m\n")
+    results = search_series(query)
+    if not results:
+        die("No results found")
+
+    show = pick(results, lambda s: f"{s['name']} ({s.get('first_air_date','?')[:4]})", "Pick show: ")
+    tmdb_id = show["id"]
+    show_name = show["name"]
+
+    print(f"\n\033[90m[cig] fetching seasons for '{show_name}'...\033[0m\n")
+    seasons = get_seasons(tmdb_id)
+    if not seasons:
+        die("No seasons found")
+
+    season = pick(seasons, lambda s: f"Season {s['season_number']} ({s['episode_count']} episodes)", "Pick season: ")
+    season_number = season["season_number"]
+
+    print(f"\n\033[90m[cig] fetching episodes...\033[0m\n")
+    episodes = get_episodes(tmdb_id, season_number)
+    if not episodes:
+        die("No episodes found")
+
+    episode = pick(episodes, lambda e: f"E{e['episode_number']:02d} — {e.get('name','')}", "Pick episode: ")
+    episode_number = episode["episode_number"]
+    episode_name = episode.get("name", "")
+
+    title = f"{show_name} S{season_number:02d}E{episode_number:02d} — {episode_name}"
+
+    print(f"\n\033[90m[cig] extracting stream for {title}...\033[0m\n")
+    url = extract_stream_url(tmdb_id, season_number, episode_number)
+
+    if not url:
+        die("Could not extract stream URL. The provider may have changed their structure.")
+
+    play(url, title)
+
+
+if __name__ == "__main__":
+    main()
