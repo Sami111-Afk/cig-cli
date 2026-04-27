@@ -32,6 +32,7 @@ function isSkippable(url) {
   let found = null;
 
   page.on('request', request => {
+    if (found) return;
     const url = request.url();
     if (isVideoUrl(url) && !isSkippable(url)) {
       process.stderr.write(`VIDEO REQ: ${url}\n`);
