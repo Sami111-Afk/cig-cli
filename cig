@@ -115,8 +115,8 @@ def get_subtitles(tmdb_id, season, episode):
     try:
         r = requests.get(
             "https://api.subdl.com/api/v1/subtitles",
-            headers={"Api-Key": SUBDL_API_KEY},
             params={
+                "api_key": SUBDL_API_KEY,
                 "tmdb_id": tmdb_id,
                 "season_number": season,
                 "episode_number": episode,
@@ -136,11 +136,17 @@ def get_subtitles(tmdb_id, season, episode):
             srt_files = [n for n in z.namelist() if n.lower().endswith(".srt")]
             if not srt_files:
                 return None
+            # season pack: pick srt matching the episode number prefix (e.g. "03 ..." or "E03...")
+            ep_str = f"{episode:02d}"
+            match = next(
+                (n for n in srt_files if re.match(rf"^(0*{episode}[^0-9]|[Ee]{ep_str})", os.path.basename(n))),
+                srt_files[0]
+            )
             tmp = tempfile.NamedTemporaryFile(
                 suffix=".srt", delete=False,
                 prefix=f"cig_{tmdb_id}_s{season}e{episode}_"
             )
-            tmp.write(z.read(srt_files[0]))
+            tmp.write(z.read(match))
             tmp.close()
             return tmp.name
     except Exception as e:
