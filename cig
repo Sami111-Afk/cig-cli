@@ -233,29 +233,40 @@ def get_subtitles(tmdb_id, season, episode):
 
 # --- Playback ---
 
-def parse_stream_headers(url):
-    """Extract referer/origin embedded in URL query params (vidlink-style)."""
-    from urllib.parse import urlparse, parse_qs
+def resolve_stream_url(url):
+    """Convert vidlink proxy URL to direct CDN URL and extract referer."""
+    from urllib.parse import urlparse, parse_qs, unquote
     try:
-        qs = parse_qs(urlparse(url).query)
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+
+        referer = None
         headers_raw = qs.get("headers", [None])[0]
         if headers_raw:
             h = json.loads(headers_raw)
-            return h.get("referer") or h.get("origin")
+            referer = h.get("referer") or h.get("origin")
+
+        host = qs.get("host", [None])[0]
+        if host:
+            path = unquote(parsed.path.replace("/proxy", "", 1))
+            url = host + path
+
+        return url, referer or "https://vidlink.pro/"
     except Exception:
-        pass
-    return None
+        return url, "https://vidlink.pro/"
 
 
 def play(stream_url, title, sub_file=None):
     print(f"\n\033[32m[cig] playing:\033[0m {title}\n")
 
-    referer = parse_stream_headers(stream_url) or "https://vidlink.pro/"
+    stream_url, referer = resolve_stream_url(stream_url)
+    origin = referer.rstrip("/")
 
     cmd = [
         "mpv",
         "--force-media-title=" + title,
         f"--referrer={referer}",
+        f"--http-header-fields=Origin: {origin},Referer: {referer}",
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
         "--slang=en",
         "--hls-bitrate=max",
