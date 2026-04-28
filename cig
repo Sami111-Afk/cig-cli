@@ -130,7 +130,16 @@ def get_subtitles(tmdb_id, season, episode):
             return None
 
         zip_url = "https://dl.subdl.com" + subs[0]["url"]
-        zip_data = requests.get(zip_url, headers=HEADERS, timeout=15).content
+        zip_data = None
+        for attempt in range(3):
+            try:
+                zip_data = requests.get(zip_url, headers=HEADERS, timeout=20).content
+                break
+            except requests.RequestException:
+                if attempt == 2:
+                    return None
+        if not zip_data:
+            return None
 
         with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
             srt_files = [n for n in z.namelist() if n.lower().endswith(".srt")]
