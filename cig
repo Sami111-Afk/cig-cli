@@ -172,8 +172,11 @@ def extract_stream(player_url):
     for line in result.stderr.strip().splitlines():
         info(line)
     if result.returncode == 0 and result.stdout.strip():
-        return result.stdout.strip()
-    return None
+        lines = result.stdout.strip().splitlines()
+        stream_url = lines[0]
+        cookie_file = lines[1] if len(lines) > 1 else None
+        return stream_url, cookie_file
+    return None, None
 
 
 # --- Subtitles ---
@@ -242,7 +245,7 @@ def get_subtitles(tmdb_id, season, episode):
 # --- Playback ---
 
 def resolve_stream_url(url):
-    """Convert vidlink proxy URL to direct CDN URL and extract referer."""
+    """Bypass vidlink proxy: extract direct CDN URL and the referer header."""
     from urllib.parse import urlparse, parse_qs, unquote
     try:
         parsed = urlparse(url)
@@ -264,7 +267,7 @@ def resolve_stream_url(url):
         return url, "https://vidlink.pro/"
 
 
-def play(stream_url, title, sub_file=None):
+def play(stream_url, title, sub_file=None, cookie_file=None):
     print(f"\n\033[32m[cig] playing:\033[0m {title}\n")
 
     stream_url, referer = resolve_stream_url(stream_url)
@@ -281,6 +284,8 @@ def play(stream_url, title, sub_file=None):
         "--no-ytdl",
         "--demuxer-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=5",
     ]
+    if cookie_file:
+        cmd += ["--cookies", f"--cookies-file={cookie_file}"]
     if sub_file:
         cmd.append(f"--sub-file={sub_file}")
         info("english subtitles loaded")
@@ -297,8 +302,9 @@ def stream_episode(tmdb_id, show_name, season_number, episode):
     title = f"{show_name} S{season_number:02d}E{ep_num:02d} — {ep_name}"
 
     stream_url = None
+    cookie_file = None
     for player_url in get_player_urls(tmdb_id, season_number, ep_num):
-        stream_url = extract_stream(player_url)
+        stream_url, cookie_file = extract_stream(player_url)
         if stream_url:
             break
 
@@ -309,13 +315,14 @@ def stream_episode(tmdb_id, show_name, season_number, episode):
         info("fetching subtitles...")
     sub_file = get_subtitles(tmdb_id, season_number, ep_num)
 
-    play(stream_url, title, sub_file)
+    play(stream_url, title, sub_file, cookie_file)
 
-    if sub_file:
-        try:
-            os.unlink(sub_file)
-        except OSError:
-            pass
+    for tmp in [sub_file, cookie_file]:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 # --- Main ---
