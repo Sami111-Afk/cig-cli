@@ -7,6 +7,7 @@ import io
 import json
 import zipfile
 import tempfile
+import threading
 import requests
 import subprocess
 from datetime import datetime
@@ -165,18 +166,25 @@ def get_player_urls(tmdb_id, season, episode):
 
 def extract_stream(player_url):
     info(f"opening player: {player_url[:60]}...")
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["node", str(EXTRACT_JS), player_url],
-        capture_output=True, text=True, timeout=50
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
-    for line in result.stderr.strip().splitlines():
-        info(line)
-    if result.returncode == 0 and result.stdout.strip():
-        lines = result.stdout.strip().splitlines()
-        stream_url = lines[0]
-        cookie_file = lines[1] if len(lines) > 1 else None
-        return stream_url, cookie_file
-    return None, None
+
+    def drain_stderr():
+        for line in proc.stderr:
+            info(line.rstrip())
+    threading.Thread(target=drain_stderr, daemon=True).start()
+
+    stream_url = proc.stdout.readline().strip()
+    cookie_line = proc.stdout.readline().strip()
+    cookie_file = cookie_line if cookie_line else None
+
+    if not stream_url:
+        proc.wait()
+        return None, None, None
+
+    return stream_url, cookie_file, proc
 
 
 # --- Subtitles ---
@@ -321,10 +329,19 @@ def stream_episode(tmdb_id, show_name, season_number, episode):
 
     stream_url = None
     cookie_file = None
+    browser_proc = None
+
     for player_url in get_player_urls(tmdb_id, season_number, ep_num):
-        stream_url, cookie_file = extract_stream(player_url)
-        if stream_url:
+        url, cf, proc = extract_stream(player_url)
+        if url:
+            stream_url, cookie_file, browser_proc = url, cf, proc
             break
+        if proc:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
     if not stream_url:
         die("Could not extract stream. All providers failed.")
@@ -334,6 +351,14 @@ def stream_episode(tmdb_id, show_name, season_number, episode):
     sub_file = get_subtitles(tmdb_id, season_number, ep_num)
 
     play(stream_url, title, sub_file, cookie_file)
+
+    # terminate browser now that mpv has exited
+    if browser_proc and browser_proc.poll() is None:
+        browser_proc.terminate()
+        try:
+            browser_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            browser_proc.kill()
 
     for tmp in [sub_file, cookie_file]:
         if tmp:

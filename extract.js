@@ -23,16 +23,14 @@ function isSkippable(url) {
   return SKIP_HOSTS.some(h => url.includes(h));
 }
 
-// convert playwright cookies to Netscape cookie file format for mpv
 function cookiesToNetscape(cookies) {
   const lines = ['# Netscape HTTP Cookie File'];
   for (const c of cookies) {
     const httpOnly = c.httpOnly ? '#HttpOnly_' : '';
-    const domain = c.domain.startsWith('.') ? c.domain : c.domain;
     const flag = c.domain.startsWith('.') ? 'TRUE' : 'FALSE';
     const secure = c.secure ? 'TRUE' : 'FALSE';
     const expires = c.expires > 0 ? Math.floor(c.expires) : 0;
-    lines.push(`${httpOnly}${domain}\t${flag}\t${c.path}\t${secure}\t${expires}\t${c.name}\t${c.value}`);
+    lines.push(`${httpOnly}${c.domain}\t${flag}\t${c.path}\t${secure}\t${expires}\t${c.name}\t${c.value}`);
   }
   return lines.join('\n');
 }
@@ -70,25 +68,33 @@ function cookiesToNetscape(cookies) {
     await page.waitForTimeout(400);
   }
 
-  // save cookies to temp file for mpv
-  let cookieFile = null;
-  if (found) {
-    try {
-      const cookies = await context.cookies();
-      const netscape = cookiesToNetscape(cookies);
-      cookieFile = path.join(os.tmpdir(), `cig_cookies_${Date.now()}.txt`);
-      fs.writeFileSync(cookieFile, netscape);
-    } catch (_) {}
-  }
-
-  await browser.close();
-
-  if (found) {
-    // output: URL\nCOOKIE_FILE (or just URL if no cookies)
-    process.stdout.write(found + '\n');
-    if (cookieFile) process.stdout.write(cookieFile + '\n');
-    process.exit(0);
-  } else {
+  if (!found) {
+    await browser.close();
     process.exit(1);
   }
+
+  // save cookies before printing URL — browser still open
+  let cookieFile = null;
+  try {
+    const cookies = await context.cookies();
+    process.stderr.write(`session cookies: ${[...new Set(cookies.map(c => c.domain))].join(', ')}\n`);
+    const netscape = cookiesToNetscape(cookies);
+    cookieFile = path.join(os.tmpdir(), `cig_cookies_${Date.now()}.txt`);
+    fs.writeFileSync(cookieFile, netscape);
+  } catch (_) {}
+
+  // output URL immediately — mpv can start while browser stays alive
+  process.stdout.write(found + '\n');
+  if (cookieFile) process.stdout.write(cookieFile + '\n');
+
+  // keep browser alive so the CDN/proxy session stays valid during playback
+  // Python will send SIGTERM when mpv exits
+  await new Promise(resolve => {
+    process.on('SIGTERM', resolve);
+    process.on('SIGINT', resolve);
+    setTimeout(resolve, 4 * 60 * 60 * 1000); // 4h failsafe
+  });
+
+  await browser.close();
+  process.exit(0);
 })();
