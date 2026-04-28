@@ -131,8 +131,23 @@ def pick(options, label_fn, header=""):
 
 def get_player_urls(tmdb_id, season, episode):
     session = requests.Session()
-    embed_url = f"https://vidsrc.to/embed/tv/{tmdb_id}/{season}/{episode}"
+
+    # provider 1: vidlink.pro — autoplay, no click needed
+    yield f"https://vidlink.pro/tv/{tmdb_id}/{season}/{episode}"
+
+    # provider 2: vidsrc.me — cloudnestra hash directly in page
     try:
+        url = f"https://vidsrc.me/embed/tv?tmdb={tmdb_id}&season={season}&episode={episode}"
+        r = session.get(url, headers={**HEADERS, "Referer": "https://vidsrc.me/"}, timeout=10)
+        hashes = re.findall(r'cloudnestra\.com/rcp/([A-Za-z0-9_\-]+)', r.text)
+        for h in hashes[:2]:
+            yield f"https://cloudnestra.com/rcp/{h}"
+    except requests.RequestException:
+        pass
+
+    # provider 3: vidsrc.to → vsembed.ru → cloudnestra
+    try:
+        embed_url = f"https://vidsrc.to/embed/tv/{tmdb_id}/{season}/{episode}"
         r = session.get(embed_url, headers={**HEADERS, "Referer": "https://vidsrc.to/"}, timeout=10)
         srcs = re.findall(r'src="((?:https?:)?//vsembed\.ru/embed/[^"]+)"', r.text)
         for src in srcs:
@@ -223,7 +238,7 @@ def play(stream_url, title, sub_file=None):
     cmd = [
         "mpv",
         "--force-media-title=" + title,
-        "--referrer=https://cloudnestra.com/",
+        "--referrer=https://videostr.net/",
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
         "--slang=en",
         "--hls-bitrate=max",

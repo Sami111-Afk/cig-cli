@@ -42,23 +42,21 @@ function isSkippable(url) {
 
   try {
     await page.goto(playerUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-
-    // wait for play button and click it
-    try {
-      const btn = await page.waitForSelector('#pl_but, .play-btn, [id*="play"]', { timeout: 8000 });
-      await btn.click();
-      process.stderr.write('clicked play button\n');
-    } catch (e) {
-      process.stderr.write(`play button: ${e.message.split('\n')[0]}\n`);
-    }
-
-    // wait up to 20s for a video URL
-    const deadline = Date.now() + 20000;
-    while (!found && Date.now() < deadline) {
-      await page.waitForTimeout(500);
-    }
   } catch (e) {
-    process.stderr.write(`page error: ${e.message.split('\n')[0]}\n`);
+    // continue even if page load times out — we may have already found the URL
+  }
+
+  // try clicking play button if present (cloudnestra-style players)
+  try {
+    const btn = await page.waitForSelector('#pl_but, .play-btn, [id*="play"]', { timeout: 4000 });
+    await btn.click();
+    process.stderr.write('clicked play button\n');
+  } catch (_) {}
+
+  // wait up to 20s for a video URL to appear in requests
+  const deadline = Date.now() + 20000;
+  while (!found && Date.now() < deadline) {
+    await page.waitForTimeout(400);
   }
 
   await browser.close();
