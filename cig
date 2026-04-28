@@ -257,8 +257,6 @@ def stream_episode(tmdb_id, show_name, season_number, episode):
 
     play(stream_url, title, sub_file)
 
-    save_history(tmdb_id, show_name, season_number, ep_num)
-
     if sub_file:
         try:
             os.unlink(sub_file)
@@ -304,7 +302,7 @@ def main():
             while True:
                 stream_episode(tmdb_id, show_name, current_season_number, current_episode)
                 current_season_number, current_episodes, current_episode = advance_episode(
-                    tmdb_id, seasons, current_season_number, current_episodes, current_episode
+                    tmdb_id, show_name, seasons, current_season_number, current_episodes, current_episode
                 )
                 if current_episode is None:
                     break
@@ -334,13 +332,13 @@ def main():
     while True:
         stream_episode(tmdb_id, show_name, current_season_number, current_episode)
         current_season_number, current_episodes, current_episode = advance_episode(
-            tmdb_id, seasons, current_season_number, current_episodes, current_episode
+            tmdb_id, show_name, seasons, current_season_number, current_episodes, current_episode
         )
         if current_episode is None:
             break
 
 
-def advance_episode(tmdb_id, seasons, current_season_number, current_episodes, current_episode):
+def advance_episode(tmdb_id, show_name, seasons, current_season_number, current_episodes, current_episode):
     ep_num = current_episode["episode_number"]
     next_ep = next((e for e in current_episodes if e["episode_number"] == ep_num + 1), None)
 
@@ -357,6 +355,10 @@ def advance_episode(tmdb_id, seasons, current_season_number, current_episodes, c
         current_season_number = next_season["season_number"]
 
     ep_label = f"S{current_season_number:02d}E{next_ep['episode_number']:02d} — {next_ep.get('name', '')}"
+
+    # save next episode to history — regardless of Y/N, next unwatched is next_ep
+    save_history(tmdb_id, show_name, current_season_number, next_ep["episode_number"])
+
     try:
         answer = input(f"\n\033[33m[next]\033[0m {ep_label}  [Y/n] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
