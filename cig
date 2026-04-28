@@ -4,16 +4,20 @@ import sys
 import os
 import re
 import io
+import json
 import zipfile
 import tempfile
 import requests
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 EXTRACT_JS = SCRIPT_DIR / "extract.js"
+HISTORY_FILE = Path.home() / ".local" / "share" / "cig-cli" / "history.json"
 
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
+SUBDL_API_KEY = os.environ.get("SUBDL_API_KEY", "")
 TMDB_BASE = "https://api.themoviedb.org/3"
 
 HEADERS = {
@@ -55,14 +59,67 @@ def get_episodes(tmdb_id, season_number):
     return r.json().get("episodes", [])
 
 
+# --- Watch history ---
+
+def load_history():
+    if HISTORY_FILE.exists():
+        try:
+            return json.loads(HISTORY_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def save_history(tmdb_id, show_name, season, episode):
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    history = load_history()
+    history[str(tmdb_id)] = {
+        "show_name": show_name,
+        "season": season,
+        "episode": episode,
+        "updated": datetime.now().isoformat(),
+    }
+    HISTORY_FILE.write_text(json.dumps(history, indent=2))
+
+
+def get_history(tmdb_id):
+    return load_history().get(str(tmdb_id))
+
+
 # --- UI ---
 
-def pick(options, label_fn, prompt="Pick: "):
-    for i, item in enumerate(options):
-        print(f"  \033[33m{i+1}\033[0m) {label_fn(item)}")
+FZF_AVAILABLE = subprocess.run(["which", "fzf"], capture_output=True).returncode == 0
+
+
+def pick(options, label_fn, header=""):
+    labels = [label_fn(item) for item in options]
+
+    if FZF_AVAILABLE:
+        fzf_input = "\n".join(labels)
+        cmd = ["fzf", "--reverse", "--height=50%", "--border=rounded",
+               "--color=prompt:cyan,pointer:yellow,hl:yellow,hl+:yellow",
+               "--prompt=  ", "--pointer=▶"]
+        if header:
+            cmd += ["--header", header]
+        try:
+            result = subprocess.run(cmd, input=fzf_input, capture_output=True, text=True)
+            if result.returncode == 0:
+                selected = result.stdout.strip()
+                idx = labels.index(selected)
+                return options[idx]
+            else:
+                die("No selection made")
+        except FileNotFoundError:
+            pass
+
+    # fallback: numbered list
+    if header:
+        print(f"\033[90m{header}\033[0m")
+    for i, label in enumerate(labels):
+        print(f"  \033[33m{i+1}\033[0m) {label}")
     print()
     try:
-        choice = int(input(prompt)) - 1
+        choice = int(input("Pick: ")) - 1
         if 0 <= choice < len(options):
             return options[choice]
     except (ValueError, KeyboardInterrupt):
@@ -106,9 +163,6 @@ def extract_stream(player_url):
 
 # --- Subtitles ---
 
-SUBDL_API_KEY = os.environ.get("SUBDL_API_KEY", "")
-
-
 def get_subtitles(tmdb_id, season, episode):
     if not SUBDL_API_KEY:
         return None
@@ -145,7 +199,6 @@ def get_subtitles(tmdb_id, season, episode):
             srt_files = [n for n in z.namelist() if n.lower().endswith(".srt")]
             if not srt_files:
                 return None
-            # season pack: pick srt matching the episode number prefix (e.g. "03 ..." or "E03...")
             ep_str = f"{episode:02d}"
             match = next(
                 (n for n in srt_files if re.match(rf"^(0*{episode}[^0-9]|[Ee]{ep_str})", os.path.basename(n))),
@@ -204,6 +257,8 @@ def stream_episode(tmdb_id, show_name, season_number, episode):
 
     play(stream_url, title, sub_file)
 
+    save_history(tmdb_id, show_name, season_number, ep_num)
+
     if sub_file:
         try:
             os.unlink(sub_file)
@@ -226,9 +281,34 @@ def main():
     if not results:
         die("No results found")
 
-    show = pick(results, lambda s: f"{s['name']} ({s.get('first_air_date','?')[:4]})", "Pick show: ")
+    show = pick(results, lambda s: f"{s['name']} ({s.get('first_air_date','?')[:4]})", header="Select show")
     tmdb_id = show["id"]
     show_name = show["name"]
+
+    # check watch history
+    last = get_history(tmdb_id)
+    if last:
+        ep_label = f"S{last['season']:02d}E{last['episode']:02d}"
+        try:
+            answer = input(f"\n\033[33m[history]\033[0m Continue from {ep_label}? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "y"
+
+        if answer not in ("n", "no"):
+            seasons = get_seasons(tmdb_id)
+            episodes = get_episodes(tmdb_id, last["season"])
+            current_episode = next((e for e in episodes if e["episode_number"] == last["episode"]), episodes[0])
+            current_episodes = episodes
+            current_season_number = last["season"]
+
+            while True:
+                stream_episode(tmdb_id, show_name, current_season_number, current_episode)
+                current_season_number, current_episodes, current_episode = advance_episode(
+                    tmdb_id, seasons, current_season_number, current_episodes, current_episode
+                )
+                if current_episode is None:
+                    break
+            return
 
     info("fetching seasons...")
     print()
@@ -236,7 +316,7 @@ def main():
     if not seasons:
         die("No seasons found")
 
-    season = pick(seasons, lambda s: f"Season {s['season_number']} ({s['episode_count']} episodes)", "Pick season: ")
+    season = pick(seasons, lambda s: f"Season {s['season_number']} ({s['episode_count']} episodes)", header="Select season")
     season_number = season["season_number"]
 
     info("fetching episodes...")
@@ -245,7 +325,7 @@ def main():
     if not episodes:
         die("No episodes found")
 
-    episode = pick(episodes, lambda e: f"E{e['episode_number']:02d} — {e.get('name','')}", "Pick episode: ")
+    episode = pick(episodes, lambda e: f"E{e['episode_number']:02d} — {e.get('name','')}", header="Select episode")
 
     current_episodes = episodes
     current_season_number = season_number
@@ -253,34 +333,39 @@ def main():
 
     while True:
         stream_episode(tmdb_id, show_name, current_season_number, current_episode)
-
-        ep_num = current_episode["episode_number"]
-        next_ep = next((e for e in current_episodes if e["episode_number"] == ep_num + 1), None)
-
-        if not next_ep:
-            next_season = next(
-                (s for s in seasons if s["season_number"] == current_season_number + 1), None
-            )
-            if not next_season:
-                print("\n\033[90m[cig] no more episodes.\033[0m")
-                break
-            next_episodes = get_episodes(tmdb_id, next_season["season_number"])
-            if not next_episodes:
-                break
-            next_ep = next_episodes[0]
-            current_episodes = next_episodes
-            current_season_number = next_season["season_number"]
-
-        ep_label = f"S{current_season_number:02d}E{next_ep['episode_number']:02d} — {next_ep.get('name', '')}"
-        try:
-            answer = input(f"\n\033[33m[next]\033[0m {ep_label}  [Y/n] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        current_season_number, current_episodes, current_episode = advance_episode(
+            tmdb_id, seasons, current_season_number, current_episodes, current_episode
+        )
+        if current_episode is None:
             break
 
-        if answer in ("n", "no"):
-            break
 
-        current_episode = next_ep
+def advance_episode(tmdb_id, seasons, current_season_number, current_episodes, current_episode):
+    ep_num = current_episode["episode_number"]
+    next_ep = next((e for e in current_episodes if e["episode_number"] == ep_num + 1), None)
+
+    if not next_ep:
+        next_season = next((s for s in seasons if s["season_number"] == current_season_number + 1), None)
+        if not next_season:
+            print("\n\033[90m[cig] no more episodes.\033[0m")
+            return current_season_number, current_episodes, None
+        next_episodes = get_episodes(tmdb_id, next_season["season_number"])
+        if not next_episodes:
+            return current_season_number, current_episodes, None
+        next_ep = next_episodes[0]
+        current_episodes = next_episodes
+        current_season_number = next_season["season_number"]
+
+    ep_label = f"S{current_season_number:02d}E{next_ep['episode_number']:02d} — {next_ep.get('name', '')}"
+    try:
+        answer = input(f"\n\033[33m[next]\033[0m {ep_label}  [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return current_season_number, current_episodes, None
+
+    if answer in ("n", "no"):
+        return current_season_number, current_episodes, None
+
+    return current_season_number, current_episodes, next_ep
 
 
 if __name__ == "__main__":
