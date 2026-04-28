@@ -210,22 +210,30 @@ def get_subtitles(tmdb_id, season, episode):
         if not zip_data:
             return None
 
-        with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
-            srt_files = [n for n in z.namelist() if n.lower().endswith(".srt")]
-            if not srt_files:
-                return None
-            ep_str = f"{episode:02d}"
-            match = next(
-                (n for n in srt_files if re.match(rf"^(0*{episode}[^0-9]|[Ee]{ep_str})", os.path.basename(n))),
-                srt_files[0]
-            )
-            tmp = tempfile.NamedTemporaryFile(
-                suffix=".srt", delete=False,
-                prefix=f"cig_{tmdb_id}_s{season}e{episode}_"
-            )
-            tmp.write(z.read(match))
-            tmp.close()
-            return tmp.name
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".srt", delete=False,
+            prefix=f"cig_{tmdb_id}_s{season}e{episode}_"
+        )
+
+        if zip_data[:2] == b'PK':  # zip magic bytes
+            with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
+                srt_files = [n for n in z.namelist() if n.lower().endswith(".srt")]
+                if not srt_files:
+                    tmp.close()
+                    os.unlink(tmp.name)
+                    return None
+                ep_str = f"{episode:02d}"
+                match = next(
+                    (n for n in srt_files if re.match(rf"^(0*{episode}[^0-9]|[Ee]{ep_str})", os.path.basename(n))),
+                    srt_files[0]
+                )
+                tmp.write(z.read(match))
+        else:
+            # direct srt content
+            tmp.write(zip_data)
+
+        tmp.close()
+        return tmp.name
     except Exception as e:
         info(f"subtitles unavailable: {e}")
         return None
