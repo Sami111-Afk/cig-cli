@@ -236,6 +236,14 @@ def get_subtitles(tmdb_id, season, episode):
             tmp.write(zip_data)
 
         tmp.close()
+
+        # validate: a real srt has digits + timestamps
+        content = Path(tmp.name).read_bytes()
+        if b'-->' not in content:
+            os.unlink(tmp.name)
+            info("subtitles invalid (no timestamps), skipping")
+            return None
+
         return tmp.name
     except Exception as e:
         info(f"subtitles unavailable: {e}")
