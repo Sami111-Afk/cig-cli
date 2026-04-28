@@ -233,15 +233,33 @@ def get_subtitles(tmdb_id, season, episode):
 
 # --- Playback ---
 
+def parse_stream_headers(url):
+    """Extract referer/origin embedded in URL query params (vidlink-style)."""
+    from urllib.parse import urlparse, parse_qs
+    try:
+        qs = parse_qs(urlparse(url).query)
+        headers_raw = qs.get("headers", [None])[0]
+        if headers_raw:
+            h = json.loads(headers_raw)
+            return h.get("referer") or h.get("origin")
+    except Exception:
+        pass
+    return None
+
+
 def play(stream_url, title, sub_file=None):
     print(f"\n\033[32m[cig] playing:\033[0m {title}\n")
+
+    referer = parse_stream_headers(stream_url) or "https://vidlink.pro/"
+
     cmd = [
         "mpv",
         "--force-media-title=" + title,
-        "--referrer=https://videostr.net/",
+        f"--referrer={referer}",
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
         "--slang=en",
         "--hls-bitrate=max",
+        "--no-ytdl",
     ]
     if sub_file:
         cmd.append(f"--sub-file={sub_file}")
