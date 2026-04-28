@@ -88,7 +88,21 @@ echo 'set -gx TMDB_API_KEY "your_key_here"' >> ~/.config/fish/config.fish
 
 Then reload your shell or open a new terminal.
 
-**5. Make cig-cli available system-wide**
+**5. (Optional) English subtitles**
+
+Many streams already have embedded English subtitles picked up automatically. For guaranteed external subtitles, get a free API key from [subdl.com](https://subdl.com) (free registration, 200 downloads/day) and add it:
+
+```bash
+# bash / zsh
+echo 'export SUBDL_API_KEY="your_subdl_key"' >> ~/.bashrc
+
+# fish
+echo 'set -gx SUBDL_API_KEY "your_subdl_key"' >> ~/.config/fish/config.fish
+```
+
+If `SUBDL_API_KEY` is not set, cig-cli still works — it just relies on embedded subtitles from the stream.
+
+**6. Make cig-cli available system-wide**
 ```bash
 sudo ln -sf "$PWD/cig" /usr/local/bin/cig-cli
 ```

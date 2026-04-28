@@ -2,10 +2,13 @@
 
 import sys
 import os
+import re
+import io
+import zipfile
+import tempfile
 import requests
 import subprocess
 from pathlib import Path
-from bs4 import BeautifulSoup
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 EXTRACT_JS = SCRIPT_DIR / "extract.js"
@@ -13,23 +16,46 @@ EXTRACT_JS = SCRIPT_DIR / "extract.js"
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
 TMDB_BASE = "https://api.themoviedb.org/3"
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+}
+
 
 def die(msg):
     print(f"\033[31m[error]\033[0m {msg}", file=sys.stderr)
     sys.exit(1)
 
 
+def info(msg):
+    print(f"\033[90m[cig] {msg}\033[0m")
+
+
+# --- TMDB ---
+
 def search_series(query):
     if not TMDB_API_KEY:
-        die("TMDB_API_KEY not set. Export it or add it to ~/.cig.conf")
-    r = requests.get(
-        f"{TMDB_BASE}/search/tv",
-        params={"api_key": TMDB_API_KEY, "query": query, "language": "en-US"},
-        timeout=10,
-    )
+        die("TMDB_API_KEY not set. Export it: export TMDB_API_KEY=your_key")
+    r = requests.get(f"{TMDB_BASE}/search/tv",
+        params={"api_key": TMDB_API_KEY, "query": query, "language": "en-US"}, timeout=10)
     r.raise_for_status()
     return r.json().get("results", [])
 
+
+def get_seasons(tmdb_id):
+    r = requests.get(f"{TMDB_BASE}/tv/{tmdb_id}",
+        params={"api_key": TMDB_API_KEY, "language": "en-US"}, timeout=10)
+    r.raise_for_status()
+    return [s for s in r.json().get("seasons", []) if s["season_number"] > 0]
+
+
+def get_episodes(tmdb_id, season_number):
+    r = requests.get(f"{TMDB_BASE}/tv/{tmdb_id}/season/{season_number}",
+        params={"api_key": TMDB_API_KEY, "language": "en-US"}, timeout=10)
+    r.raise_for_status()
+    return r.json().get("episodes", [])
+
+
+# --- UI ---
 
 def pick(options, label_fn, prompt="Pick: "):
     for i, item in enumerate(options):
@@ -44,91 +70,133 @@ def pick(options, label_fn, prompt="Pick: "):
     die("Invalid choice")
 
 
-def get_seasons(tmdb_id):
-    r = requests.get(
-        f"{TMDB_BASE}/tv/{tmdb_id}",
-        params={"api_key": TMDB_API_KEY, "language": "en-US"},
-        timeout=10,
-    )
-    r.raise_for_status()
-    data = r.json()
-    return [s for s in data.get("seasons", []) if s["season_number"] > 0]
-
-
-def get_episodes(tmdb_id, season_number):
-    r = requests.get(
-        f"{TMDB_BASE}/tv/{tmdb_id}/season/{season_number}",
-        params={"api_key": TMDB_API_KEY, "language": "en-US"},
-        timeout=10,
-    )
-    r.raise_for_status()
-    return r.json().get("episodes", [])
-
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
-}
-
+# --- Stream extraction ---
 
 def get_player_urls(tmdb_id, season, episode):
-    """Yield cloudnestra player URLs by scraping provider embed pages."""
-    providers = [
-        (
-            f"https://vidsrc.to/embed/tv/{tmdb_id}/{season}/{episode}",
-            "https://vidsrc.to/",
-            lambda html: [
-                "https:" + src if src.startswith("//") else src
-                for src in __import__("re").findall(r'src="((?:https?:)?//vsembed\.ru/embed/[^"]+)"', html)
-            ],
-        ),
-    ]
-
-    import re
     session = requests.Session()
-
-    for embed_url, referer, get_iframes in providers:
-        try:
-            r = session.get(embed_url, headers={**HEADERS, "Referer": referer}, timeout=10)
-            iframe_urls = get_iframes(r.text)
-            for iframe_url in iframe_urls:
-                try:
-                    r2 = session.get(iframe_url, headers={**HEADERS, "Referer": embed_url}, timeout=10)
-                    hashes = re.findall(r'data-hash="([^"]+)"', r2.text)
-                    for h in hashes[:2]:  # try first 2 sources
-                        yield f"https://cloudnestra.com/rcp/{h}"
-                except requests.RequestException:
-                    continue
-        except requests.RequestException:
-            continue
+    embed_url = f"https://vidsrc.to/embed/tv/{tmdb_id}/{season}/{episode}"
+    try:
+        r = session.get(embed_url, headers={**HEADERS, "Referer": "https://vidsrc.to/"}, timeout=10)
+        srcs = re.findall(r'src="((?:https?:)?//vsembed\.ru/embed/[^"]+)"', r.text)
+        for src in srcs:
+            iframe_url = "https:" + src if src.startswith("//") else src
+            try:
+                r2 = session.get(iframe_url, headers={**HEADERS, "Referer": embed_url}, timeout=10)
+                hashes = re.findall(r'data-hash="([^"]+)"', r2.text)
+                for h in hashes[:2]:
+                    yield f"https://cloudnestra.com/rcp/{h}"
+            except requests.RequestException:
+                continue
+    except requests.RequestException:
+        pass
 
 
 def extract_stream(player_url):
-    print(f"\033[90m[cig] opening player: {player_url[:60]}...\033[0m")
+    info(f"opening player: {player_url[:60]}...")
     result = subprocess.run(
         ["node", str(EXTRACT_JS), player_url],
         capture_output=True, text=True, timeout=50
     )
     for line in result.stderr.strip().splitlines():
-        print(f"\033[90m[cig] {line}\033[0m")
+        info(line)
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
     return None
 
 
-def play(stream_url, title):
+# --- Subtitles ---
+
+SUBDL_API_KEY = os.environ.get("SUBDL_API_KEY", "")
+
+
+def get_subtitles(tmdb_id, season, episode):
+    if not SUBDL_API_KEY:
+        return None
+    try:
+        r = requests.get(
+            "https://api.subdl.com/api/v1/subtitles",
+            headers={"Api-Key": SUBDL_API_KEY},
+            params={
+                "tmdb_id": tmdb_id,
+                "season_number": season,
+                "episode_number": episode,
+                "languages": "EN",
+                "type": "tv",
+            },
+            timeout=10,
+        )
+        subs = [s for s in r.json().get("subtitles", []) if s.get("language") == "EN"]
+        if not subs:
+            return None
+
+        zip_url = "https://dl.subdl.com" + subs[0]["url"]
+        zip_data = requests.get(zip_url, headers=HEADERS, timeout=15).content
+
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
+            srt_files = [n for n in z.namelist() if n.lower().endswith(".srt")]
+            if not srt_files:
+                return None
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".srt", delete=False,
+                prefix=f"cig_{tmdb_id}_s{season}e{episode}_"
+            )
+            tmp.write(z.read(srt_files[0]))
+            tmp.close()
+            return tmp.name
+    except Exception as e:
+        info(f"subtitles unavailable: {e}")
+        return None
+
+
+# --- Playback ---
+
+def play(stream_url, title, sub_file=None):
     print(f"\n\033[32m[cig] playing:\033[0m {title}\n")
     cmd = [
         "mpv",
         "--force-media-title=" + title,
         "--referrer=https://cloudnestra.com/",
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
-        stream_url,
+        "--slang=en",
     ]
+    if sub_file:
+        cmd.append(f"--sub-file={sub_file}")
+        info("english subtitles loaded")
+    cmd.append(stream_url)
     try:
         subprocess.run(cmd)
     except FileNotFoundError:
         die("mpv not found. Install it: pacman -S mpv")
 
+
+def stream_episode(tmdb_id, show_name, season_number, episode):
+    ep_num = episode["episode_number"]
+    ep_name = episode.get("name", "")
+    title = f"{show_name} S{season_number:02d}E{ep_num:02d} — {ep_name}"
+
+    stream_url = None
+    for player_url in get_player_urls(tmdb_id, season_number, ep_num):
+        stream_url = extract_stream(player_url)
+        if stream_url:
+            break
+
+    if not stream_url:
+        die("Could not extract stream. All providers failed.")
+
+    if SUBDL_API_KEY:
+        info("fetching subtitles...")
+    sub_file = get_subtitles(tmdb_id, season_number, ep_num)
+
+    play(stream_url, title, sub_file)
+
+    if sub_file:
+        try:
+            os.unlink(sub_file)
+        except OSError:
+            pass
+
+
+# --- Main ---
 
 def main():
     print("\033[1m\033[36m cig-cli\033[0m — stream series in your terminal\n")
@@ -137,7 +205,8 @@ def main():
     if not query:
         die("No query provided")
 
-    print(f"\n\033[90m[cig] searching for '{query}'...\033[0m\n")
+    info(f"searching for '{query}'...")
+    print()
     results = search_series(query)
     if not results:
         die("No results found")
@@ -146,7 +215,8 @@ def main():
     tmdb_id = show["id"]
     show_name = show["name"]
 
-    print(f"\n\033[90m[cig] fetching seasons for '{show_name}'...\033[0m\n")
+    info("fetching seasons...")
+    print()
     seasons = get_seasons(tmdb_id)
     if not seasons:
         die("No seasons found")
@@ -154,29 +224,48 @@ def main():
     season = pick(seasons, lambda s: f"Season {s['season_number']} ({s['episode_count']} episodes)", "Pick season: ")
     season_number = season["season_number"]
 
-    print(f"\n\033[90m[cig] fetching episodes...\033[0m\n")
+    info("fetching episodes...")
+    print()
     episodes = get_episodes(tmdb_id, season_number)
     if not episodes:
         die("No episodes found")
 
     episode = pick(episodes, lambda e: f"E{e['episode_number']:02d} — {e.get('name','')}", "Pick episode: ")
-    episode_number = episode["episode_number"]
-    episode_name = episode.get("name", "")
 
-    title = f"{show_name} S{season_number:02d}E{episode_number:02d} — {episode_name}"
+    current_episodes = episodes
+    current_season_number = season_number
+    current_episode = episode
 
-    title = f"{show_name} S{season_number:02d}E{episode_number:02d} — {episode_name}"
+    while True:
+        stream_episode(tmdb_id, show_name, current_season_number, current_episode)
 
-    stream_url = None
-    for player_url in get_player_urls(tmdb_id, season_number, episode_number):
-        stream_url = extract_stream(player_url)
-        if stream_url:
+        ep_num = current_episode["episode_number"]
+        next_ep = next((e for e in current_episodes if e["episode_number"] == ep_num + 1), None)
+
+        if not next_ep:
+            next_season = next(
+                (s for s in seasons if s["season_number"] == current_season_number + 1), None
+            )
+            if not next_season:
+                print("\n\033[90m[cig] no more episodes.\033[0m")
+                break
+            next_episodes = get_episodes(tmdb_id, next_season["season_number"])
+            if not next_episodes:
+                break
+            next_ep = next_episodes[0]
+            current_episodes = next_episodes
+            current_season_number = next_season["season_number"]
+
+        ep_label = f"S{current_season_number:02d}E{next_ep['episode_number']:02d} — {next_ep.get('name', '')}"
+        try:
+            answer = input(f"\n\033[33m[next]\033[0m {ep_label}  [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
             break
 
-    if not stream_url:
-        die("Could not extract stream. All providers failed.")
+        if answer in ("n", "no"):
+            break
 
-    play(stream_url, title)
+        current_episode = next_ep
 
 
 if __name__ == "__main__":
