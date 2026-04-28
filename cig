@@ -226,22 +226,32 @@ def get_subtitles(tmdb_id, season, episode):
                     os.unlink(tmp.name)
                     return None
                 ep_str = f"{episode:02d}"
-                match = next(
-                    (n for n in srt_files if re.match(rf"^(0*{episode}[^0-9]|[Ee]{ep_str})", os.path.basename(n))),
-                    srt_files[0]
+                # try progressively looser patterns
+                match = (
+                    next((n for n in srt_files if re.search(rf"[Ee]{ep_str}[^0-9]", os.path.basename(n))), None)
+                    or next((n for n in srt_files if re.search(rf"[Ee]{ep_str}$", os.path.basename(n).rsplit(".", 1)[0])), None)
+                    or next((n for n in srt_files if re.search(rf"(^|[^0-9])0*{episode}([^0-9]|$)", os.path.basename(n))), None)
+                    or srt_files[0]
                 )
-                tmp.write(z.read(match))
+                info(f"subtitle file selected: {os.path.basename(match)} (from {len(srt_files)} in zip)")
+                content = z.read(match)
+                # strip UTF-8 BOM
+                if content.startswith(b'\xef\xbb\xbf'):
+                    content = content[3:]
+                tmp.write(content)
         else:
-            # direct srt content
-            tmp.write(zip_data)
+            content = zip_data
+            if content.startswith(b'\xef\xbb\xbf'):
+                content = content[3:]
+            tmp.write(content)
 
         tmp.close()
 
-        # validate: a real srt has digits + timestamps
+        # validate: must have a real SRT timestamp
         content = Path(tmp.name).read_bytes()
-        if b'-->' not in content:
+        if not re.search(rb'\d{2}:\d{2}:\d{2}[,\.]\d{3} *-->', content):
+            info(f"subtitle invalid (first 120 bytes: {content[:120]})")
             os.unlink(tmp.name)
-            info("subtitles invalid (no timestamps), skipping")
             return None
 
         return tmp.name
