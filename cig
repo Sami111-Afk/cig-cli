@@ -226,6 +226,7 @@ def play(stream_url, title, sub_file=None):
         "--referrer=https://cloudnestra.com/",
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
         "--slang=en",
+        "--hls-bitrate=max",
     ]
     if sub_file:
         cmd.append(f"--sub-file={sub_file}")
