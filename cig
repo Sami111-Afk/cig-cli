@@ -319,35 +319,56 @@ def resolve_stream_url(url):
 
 
 def sync_subtitles(stream_url, sub_file, cookie_file):
-    """Auto-sync subtitle timing using ffsubsync + mpv audio extraction."""
-    if not sub_file or not shutil.which("ffsubsync"):
+    """Auto-sync subtitles: alass handles fps drift, ffsubsync handles constant offset."""
+    has_alass = shutil.which("alass")
+    has_ffsubsync = shutil.which("ffsubsync")
+    if not sub_file or (not has_alass and not has_ffsubsync):
         return sub_file
 
     resolved_url, referer = resolve_stream_url(stream_url)
     origin = referer.rstrip("/")
+    ref_audio = sub_file.replace(".srt", "_ref.wav")
     synced = sub_file.replace(".srt", "_synced.srt")
 
-    info("syncing subtitles to stream (~40s)...")
-    # pass video URL directly so ffsubsync can detect fps drift, not just offset
-    ffmpeg_args = (
-        f'-user_agent "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"'
-        f' -headers "Referer: {referer}\\r\\nOrigin: {origin}\\r\\n"'
-    )
+    info("syncing subtitles (~40s)...")
     try:
-        result = subprocess.run(
-            ["ffsubsync", resolved_url,
-             "-i", sub_file, "-o", synced,
-             "--ffmpeg-args", ffmpeg_args,
-             "--max-offset-seconds", "120"],
-            capture_output=True, timeout=180
-        )
+        subprocess.run([
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-user_agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+            "-headers", f"Referer: {referer}\r\nOrigin: {origin}\r\n",
+            "-i", resolved_url,
+            "-t", "300", "-vn",
+            "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            ref_audio,
+        ], capture_output=True, timeout=150)
+
+        if not Path(ref_audio).exists() or Path(ref_audio).stat().st_size < 1000:
+            info("sync: could not extract audio, skipping")
+            return sub_file
+
+        if has_alass:
+            result = subprocess.run(
+                ["alass", ref_audio, sub_file, synced],
+                capture_output=True, timeout=90
+            )
+        else:
+            result = subprocess.run(
+                ["ffsubsync", ref_audio, "-i", sub_file, "-o", synced],
+                capture_output=True, timeout=90
+            )
+
         if result.returncode == 0 and Path(synced).exists():
             info("subtitles synced")
             os.unlink(sub_file)
             return synced
-        info(f"sync: {result.stderr.decode()[:200]}")
+        info(f"sync failed: {(result.stderr or result.stdout).decode()[:200]}")
     except Exception as e:
         info(f"sync error: {e}")
+    finally:
+        try:
+            os.unlink(ref_audio)
+        except OSError:
+            pass
     return sub_file
 
 
