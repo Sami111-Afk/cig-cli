@@ -212,11 +212,19 @@ def get_subtitles(tmdb_id, season, episode):
         for s in subs[:6]:
             info(f"sub available: {s.get('release_name') or s.get('name') or s.get('url')}")
 
-        # prefer WEB/WEBRip releases — vidlink.pro streams web versions
         WEB_TAGS = ["WEB", "WEBRip", "WEBDL", "WEB-DL", "AMZN", "NF", "DSNP"]
-        preferred = next(
-            (s for s in subs if any(t.upper() in (s.get("release_name") or "").upper() for t in WEB_TAGS)),
-            subs[0]
+
+        def is_web(s):
+            return any(t.upper() in (s.get("release_name") or "").upper() for t in WEB_TAGS)
+
+        ep_specific = [s for s in subs if not s.get("full_season")]
+        season_packs = [s for s in subs if s.get("full_season")]
+
+        preferred = (
+            next((s for s in ep_specific if is_web(s)), None)
+            or next(iter(ep_specific), None)
+            or next((s for s in season_packs if is_web(s)), None)
+            or subs[0]
         )
         info(f"sub selected: {preferred.get('release_name') or preferred.get('name') or preferred.get('url')}")
 
