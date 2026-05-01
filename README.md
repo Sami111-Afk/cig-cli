@@ -50,6 +50,7 @@ No manual browser needed. The whole thing runs in your terminal.
 | mpv | `pacman -S mpv` / `brew install mpv` |
 | python-requests | `pacman -S python-requests` or `pip install requests` |
 | python-beautifulsoup4 | `pacman -S python-beautifulsoup4` or `pip install beautifulsoup4` |
+| ffsubsync *(optional)* | `pip install ffsubsync` — auto-syncs subtitles to stream audio |
 
 ---
 
