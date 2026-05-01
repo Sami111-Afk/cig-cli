@@ -209,7 +209,18 @@ def get_subtitles(tmdb_id, season, episode):
         if not subs:
             return None
 
-        zip_url = "https://dl.subdl.com" + subs[0]["url"]
+        for s in subs[:6]:
+            info(f"sub available: {s.get('release_name') or s.get('name') or s.get('url')}")
+
+        # prefer WEB/WEBRip releases — vidlink.pro streams web versions
+        WEB_TAGS = ["WEB", "WEBRip", "WEBDL", "WEB-DL", "AMZN", "NF", "DSNP"]
+        preferred = next(
+            (s for s in subs if any(t.upper() in (s.get("release_name") or "").upper() for t in WEB_TAGS)),
+            subs[0]
+        )
+        info(f"sub selected: {preferred.get('release_name') or preferred.get('name') or preferred.get('url')}")
+
+        zip_url = "https://dl.subdl.com" + preferred["url"]
         zip_data = None
         for attempt in range(3):
             try:
