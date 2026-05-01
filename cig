@@ -433,7 +433,6 @@ def stream_episode(tmdb_id, show_name, season_number, episode):
     if SUBDL_API_KEY:
         info("fetching subtitles...")
     sub_file = get_subtitles(tmdb_id, season_number, ep_num)
-    sub_file = sync_subtitles(stream_url, sub_file, cookie_file)
 
     play(stream_url, title, sub_file, cookie_file)
 
