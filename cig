@@ -5,6 +5,7 @@ import os
 import re
 import io
 import json
+import shutil
 import zipfile
 import tempfile
 import threading
@@ -217,8 +218,13 @@ def get_subtitles(tmdb_id, season, episode):
         def is_web(s):
             return any(t.upper() in (s.get("release_name") or "").upper() for t in WEB_TAGS)
 
-        ep_specific = [s for s in subs if not s.get("full_season")]
-        season_packs = [s for s in subs if s.get("full_season")]
+        def is_ep_specific(s):
+            name = (s.get("release_name") or "").upper()
+            # has explicit episode marker: S01E01, 3x10, etc.
+            return bool(re.search(r'S\d{2}E\d{2}|\d+X\d{2}', name)) or s.get("full_season") is False and not re.search(r'S\d{2}\.', name)
+
+        ep_specific = [s for s in subs if is_ep_specific(s)]
+        season_packs = [s for s in subs if not is_ep_specific(s)]
 
         preferred = (
             next((s for s in ep_specific if is_web(s)), None)
@@ -312,6 +318,54 @@ def resolve_stream_url(url):
         return url, "https://vidlink.pro/"
 
 
+def sync_subtitles(stream_url, sub_file, cookie_file):
+    """Auto-sync subtitle timing using ffsubsync + mpv audio extraction."""
+    if not sub_file or not shutil.which("ffsubsync"):
+        return sub_file
+
+    resolved_url, referer = resolve_stream_url(stream_url)
+    origin = referer.rstrip("/")
+    ref_audio = sub_file.replace(".srt", "_ref.wav")
+    synced = sub_file.replace(".srt", "_synced.srt")
+
+    info("syncing subtitles to stream audio (~30s)...")
+    try:
+        mpv_cmd = [
+            "mpv", resolved_url,
+            "--no-video", "--length=120",
+            f"--referrer={referer}",
+            f"--http-header-fields=Origin: {origin},Referer: {referer}",
+            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+            "--no-ytdl", "--quiet",
+            "--ao=pcm", f"--ao-pcm-file={ref_audio}",
+        ]
+        if cookie_file:
+            mpv_cmd += ["--cookies", f"--cookies-file={cookie_file}"]
+        subprocess.run(mpv_cmd, capture_output=True, timeout=90)
+
+        if not Path(ref_audio).exists() or Path(ref_audio).stat().st_size == 0:
+            info("sync: could not extract reference audio, skipping")
+            return sub_file
+
+        result = subprocess.run(
+            ["ffsubsync", ref_audio, "-i", sub_file, "-o", synced],
+            capture_output=True, timeout=60
+        )
+        if result.returncode == 0 and Path(synced).exists():
+            info("subtitles synced")
+            os.unlink(sub_file)
+            return synced
+        info("sync: ffsubsync failed, using unsynced subtitle")
+    except Exception as e:
+        info(f"sync error: {e}")
+    finally:
+        try:
+            os.unlink(ref_audio)
+        except OSError:
+            pass
+    return sub_file
+
+
 def play(stream_url, title, sub_file=None, cookie_file=None):
     print(f"\n\033[32m[cig] playing:\033[0m {title}\n")
 
@@ -368,6 +422,7 @@ def stream_episode(tmdb_id, show_name, season_number, episode):
     if SUBDL_API_KEY:
         info("fetching subtitles...")
     sub_file = get_subtitles(tmdb_id, season_number, ep_num)
+    sub_file = sync_subtitles(stream_url, sub_file, cookie_file)
 
     play(stream_url, title, sub_file, cookie_file)
 
