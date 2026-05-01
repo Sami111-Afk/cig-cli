@@ -5,7 +5,7 @@ import os
 import re
 import io
 import json
-import shutil
+import socket
 import zipfile
 import tempfile
 import threading
@@ -318,94 +318,60 @@ def resolve_stream_url(url):
         return url, "https://vidlink.pro/"
 
 
-def rescale_srt(sub_file, scale):
-    """Rescale all SRT timestamps by scale factor to fix fps drift."""
-    ts = re.compile(r'(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})')
-
-    def to_ms(h, m, s, ms):
-        return int(h) * 3600000 + int(m) * 60000 + int(s) * 1000 + int(ms)
-
-    def fmt(ms):
-        ms = max(0, int(ms))
-        h, r = divmod(ms, 3600000)
-        m, r = divmod(r, 60000)
-        s, ms = divmod(r, 1000)
-        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
-    def fix(match):
-        start = to_ms(*match.groups()[:4]) * scale
-        end = to_ms(*match.groups()[4:]) * scale
-        return f"{fmt(start)} --> {fmt(end)}"
-
-    content = Path(sub_file).read_text(encoding="utf-8", errors="replace")
-    Path(sub_file).write_text(ts.sub(fix, content), encoding="utf-8")
-    return sub_file
-
-
-def sync_subtitles(stream_url, sub_file, cookie_file):
-    """Auto-sync subtitles: alass handles fps drift, ffsubsync handles constant offset."""
-    has_alass = shutil.which("alass")
-    has_ffsubsync = shutil.which("ffsubsync")
-    if not sub_file or (not has_alass and not has_ffsubsync):
-        return sub_file
-
-    resolved_url, referer = resolve_stream_url(stream_url)
-    origin = referer.rstrip("/")
-    ref_audio = sub_file.replace(".srt", "_ref.wav")
-    synced = sub_file.replace(".srt", "_synced.srt")
-
-    info("syncing subtitles (~40s)...")
+def get_mpv_props(sock_path):
+    props = ["sub-speed", "sub-delay"]
+    result = {}
     try:
-        mpv_cmd = [
-            "mpv", resolved_url,
-            "--no-video", "--length=300", "--quiet",
-            f"--referrer={referer}",
-            f"--http-header-fields=Origin: {origin},Referer: {referer}",
-            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
-            "--no-ytdl",
-            "--demuxer-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=5",
-            "--audio-samplerate=16000", "--audio-channels=mono",
-            "--ao=pcm", f"--ao-pcm-file={ref_audio}",
-        ]
-        if cookie_file:
-            mpv_cmd += ["--cookies", f"--cookies-file={cookie_file}"]
-        subprocess.run(mpv_cmd, capture_output=True, timeout=150)
-
-        if not Path(ref_audio).exists() or Path(ref_audio).stat().st_size < 1000:
-            info("sync: could not extract audio, skipping")
-            return sub_file
-
-        if has_alass:
-            result = subprocess.run(
-                ["alass", ref_audio, sub_file, synced],
-                capture_output=True, timeout=90
-            )
-        else:
-            result = subprocess.run(
-                ["ffsubsync", ref_audio, "-i", sub_file, "-o", synced],
-                capture_output=True, timeout=90
-            )
-
-        if result.returncode == 0 and Path(synced).exists():
-            info("subtitles synced")
-            os.unlink(sub_file)
-            return synced
-        info(f"sync failed: {(result.stderr or result.stdout).decode()[:200]}")
-    except Exception as e:
-        info(f"sync error: {e}")
-    finally:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(sock_path)
+        for i, prop in enumerate(props):
+            cmd = json.dumps({"command": ["get_property", prop], "request_id": i}) + "\n"
+            s.sendall(cmd.encode())
+        buf = b""
+        s.settimeout(1)
         try:
-            os.unlink(ref_audio)
-        except OSError:
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        except (socket.timeout, OSError):
             pass
-    return sub_file
+        s.close()
+        for line in buf.decode(errors="replace").splitlines():
+            try:
+                data = json.loads(line)
+                if data.get("error") == "success" and "request_id" in data:
+                    result[props[data["request_id"]]] = data["data"]
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return result
 
 
-def play(stream_url, title, sub_file=None, cookie_file=None):
+def save_sub_sync(tmdb_id, sub_speed, sub_delay):
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    history = load_history()
+    entry = history.setdefault(str(tmdb_id), {})
+    if abs(sub_speed - 1.0) > 0.001:
+        entry["sub_speed"] = round(sub_speed, 4)
+    else:
+        entry.pop("sub_speed", None)
+    if abs(sub_delay) > 0.05:
+        entry["sub_delay"] = round(sub_delay, 3)
+    else:
+        entry.pop("sub_delay", None)
+    HISTORY_FILE.write_text(json.dumps(history, indent=2))
+
+
+def play(stream_url, title, sub_file=None, cookie_file=None, sub_speed=1.0, sub_delay=0.0):
     print(f"\n\033[32m[cig] playing:\033[0m {title}\n")
 
     stream_url, referer = resolve_stream_url(stream_url)
     origin = referer.rstrip("/")
+    sock_path = f"/tmp/cig_mpv_{os.getpid()}.socket"
 
     cmd = [
         "mpv",
@@ -417,17 +383,47 @@ def play(stream_url, title, sub_file=None, cookie_file=None):
         "--hls-bitrate=max",
         "--no-ytdl",
         "--demuxer-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=5",
+        f"--input-ipc-server={sock_path}",
     ]
+    if abs(sub_speed - 1.0) > 0.001:
+        cmd.append(f"--sub-speed={sub_speed}")
+    if abs(sub_delay) > 0.001:
+        cmd.append(f"--sub-delay={sub_delay}")
     if cookie_file:
         cmd += ["--cookies", f"--cookies-file={cookie_file}"]
     if sub_file:
         cmd.append(f"--sub-file={sub_file}")
-        info("english subtitles loaded")
+        speed_note = f" (speed={sub_speed:.4f})" if abs(sub_speed - 1.0) > 0.001 else ""
+        info(f"english subtitles loaded{speed_note}")
     cmd.append(stream_url)
+
+    last_props = {"sub-speed": sub_speed, "sub-delay": sub_delay}
+    stop_monitor = threading.Event()
+
+    def monitor():
+        stop_monitor.wait(4)  # wait for mpv to start and create socket
+        while not stop_monitor.is_set():
+            props = get_mpv_props(sock_path)
+            if props:
+                last_props.update(props)
+            stop_monitor.wait(5)
+
+    t = threading.Thread(target=monitor, daemon=True)
+    t.start()
+
     try:
         subprocess.run(cmd)
     except FileNotFoundError:
         die("mpv not found. Install it: pacman -S mpv")
+    finally:
+        stop_monitor.set()
+        t.join(timeout=2)
+        try:
+            os.unlink(sock_path)
+        except OSError:
+            pass
+
+    return last_props["sub-speed"], last_props["sub-delay"]
 
 
 def stream_episode(tmdb_id, show_name, season_number, episode):
@@ -457,10 +453,17 @@ def stream_episode(tmdb_id, show_name, season_number, episode):
     if SUBDL_API_KEY:
         info("fetching subtitles...")
     sub_file = get_subtitles(tmdb_id, season_number, ep_num)
-    if sub_file:
-        rescale_srt(sub_file, 23.976 / 25)  # 25fps subtitle → 23.976fps stream
 
-    play(stream_url, title, sub_file, cookie_file)
+    history = get_history(tmdb_id)
+    sub_speed = history.get("sub_speed", 1.0) if history else 1.0
+    sub_delay = history.get("sub_delay", 0.0) if history else 0.0
+
+    final_speed, final_delay = play(stream_url, title, sub_file, cookie_file, sub_speed, sub_delay)
+
+    if sub_file:
+        save_sub_sync(tmdb_id, final_speed, final_delay)
+        if abs(final_speed - sub_speed) > 0.001 or abs(final_delay - sub_delay) > 0.05:
+            info(f"sub sync saved: speed={final_speed:.4f} delay={final_delay:.3f}s")
 
     # terminate browser now that mpv has exited
     if browser_proc and browser_proc.poll() is None:
