@@ -318,6 +318,30 @@ def resolve_stream_url(url):
         return url, "https://vidlink.pro/"
 
 
+def rescale_srt(sub_file, scale):
+    """Rescale all SRT timestamps by scale factor to fix fps drift."""
+    ts = re.compile(r'(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})')
+
+    def to_ms(h, m, s, ms):
+        return int(h) * 3600000 + int(m) * 60000 + int(s) * 1000 + int(ms)
+
+    def fmt(ms):
+        ms = max(0, int(ms))
+        h, r = divmod(ms, 3600000)
+        m, r = divmod(r, 60000)
+        s, ms = divmod(r, 1000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    def fix(match):
+        start = to_ms(*match.groups()[:4]) * scale
+        end = to_ms(*match.groups()[4:]) * scale
+        return f"{fmt(start)} --> {fmt(end)}"
+
+    content = Path(sub_file).read_text(encoding="utf-8", errors="replace")
+    Path(sub_file).write_text(ts.sub(fix, content), encoding="utf-8")
+    return sub_file
+
+
 def sync_subtitles(stream_url, sub_file, cookie_file):
     """Auto-sync subtitles: alass handles fps drift, ffsubsync handles constant offset."""
     has_alass = shutil.which("alass")
@@ -433,6 +457,8 @@ def stream_episode(tmdb_id, show_name, season_number, episode):
     if SUBDL_API_KEY:
         info("fetching subtitles...")
     sub_file = get_subtitles(tmdb_id, season_number, ep_num)
+    if sub_file:
+        rescale_srt(sub_file, 23.976 / 25)  # 25fps subtitle → 23.976fps stream
 
     play(stream_url, title, sub_file, cookie_file)
 
