@@ -5,6 +5,7 @@ import os
 import re
 import io
 import json
+import time
 import socket
 import zipfile
 import tempfile
@@ -411,8 +412,11 @@ def play(stream_url, title, sub_file=None, cookie_file=None, sub_speed=1.0, sub_
     t = threading.Thread(target=monitor, daemon=True)
     t.start()
 
+    returncode = 1
+    started = time.time()
     try:
-        subprocess.run(cmd)
+        result = subprocess.run(cmd)
+        returncode = result.returncode
     except FileNotFoundError:
         die("mpv not found. Install it: pacman -S mpv")
     finally:
@@ -423,32 +427,23 @@ def play(stream_url, title, sub_file=None, cookie_file=None, sub_speed=1.0, sub_
         except OSError:
             pass
 
-    return last_props["sub-speed"], last_props["sub-delay"]
+    elapsed = time.time() - started
+    return last_props["sub-speed"], last_props["sub-delay"], returncode, elapsed
+
+
+def _kill_proc(proc):
+    if proc and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def stream_episode(tmdb_id, show_name, season_number, episode):
     ep_num = episode["episode_number"]
     ep_name = episode.get("name", "")
     title = f"{show_name} S{season_number:02d}E{ep_num:02d} — {ep_name}"
-
-    stream_url = None
-    cookie_file = None
-    browser_proc = None
-
-    for player_url in get_player_urls(tmdb_id, season_number, ep_num):
-        url, cf, proc = extract_stream(player_url)
-        if url:
-            stream_url, cookie_file, browser_proc = url, cf, proc
-            break
-        if proc:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-
-    if not stream_url:
-        die("Could not extract stream. All providers failed.")
 
     if SUBDL_API_KEY:
         info("fetching subtitles...")
@@ -458,27 +453,50 @@ def stream_episode(tmdb_id, show_name, season_number, episode):
     sub_speed = history.get("sub_speed", 1.0) if history else 1.0
     sub_delay = history.get("sub_delay", 0.0) if history else 0.0
 
-    final_speed, final_delay = play(stream_url, title, sub_file, cookie_file, sub_speed, sub_delay)
+    final_speed, final_delay = sub_speed, sub_delay
+    played = False
+
+    for player_url in get_player_urls(tmdb_id, season_number, ep_num):
+        url, cookie_file, browser_proc = extract_stream(player_url)
+        if not url:
+            continue
+
+        info(f"stream: {url[:80]}...")
+        final_speed, final_delay, exit_code, elapsed = play(
+            url, title, sub_file, cookie_file, sub_speed, sub_delay
+        )
+
+        _kill_proc(browser_proc)
+        if cookie_file:
+            try:
+                os.unlink(cookie_file)
+            except OSError:
+                pass
+
+        # provider failed fast → try next; otherwise treat as success
+        if exit_code != 0 and elapsed < 30:
+            info(f"provider failed (exit {exit_code}, {elapsed:.0f}s), trying next...")
+            continue
+
+        played = True
+        break
+
+    if not played:
+        if sub_file:
+            try:
+                os.unlink(sub_file)
+            except OSError:
+                pass
+        die("Could not play stream. All providers failed.")
 
     if sub_file:
         save_sub_sync(tmdb_id, final_speed, final_delay)
         if abs(final_speed - sub_speed) > 0.001 or abs(final_delay - sub_delay) > 0.05:
             info(f"sub sync saved: speed={final_speed:.4f} delay={final_delay:.3f}s")
-
-    # terminate browser now that mpv has exited
-    if browser_proc and browser_proc.poll() is None:
-        browser_proc.terminate()
         try:
-            browser_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            browser_proc.kill()
-
-    for tmp in [sub_file, cookie_file]:
-        if tmp:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            os.unlink(sub_file)
+        except OSError:
+            pass
 
 
 # --- Main ---
