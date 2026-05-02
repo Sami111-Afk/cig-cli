@@ -15,6 +15,18 @@ const SKIP_HOSTS = [
   'stoperinbent', 'jiggerskohlcasinet', 'yandex', 'clarity.ms',
 ];
 
+const STEALTH_SCRIPT = `
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+  window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {}, app: {} };
+  const orig = navigator.permissions.query.bind(navigator.permissions);
+  navigator.permissions.query = (p) =>
+    p.name === 'notifications'
+      ? Promise.resolve({ state: Notification.permission })
+      : orig(p);
+`;
+
 function isVideoUrl(url) {
   return /\.(m3u8|mp4)(\?|$)/i.test(url);
 }
@@ -40,6 +52,8 @@ function cookiesToNetscape(cookies) {
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   });
+
+  await context.addInitScript(STEALTH_SCRIPT);
 
   const page = await context.newPage();
   let found = null;

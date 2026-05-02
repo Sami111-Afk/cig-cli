@@ -271,19 +271,26 @@ def get_subtitles(tmdb_id, season, episode):
 # --- Playback ---
 
 def resolve_stream_url(url):
-    """Extract the correct Referer from vidlink proxy URLs; keep proxy URL intact."""
-    from urllib.parse import urlparse, parse_qs
+    """Extract direct CDN URL and Referer from vidlink proxy URLs."""
+    from urllib.parse import urlparse, parse_qs, unquote
     try:
-        qs = parse_qs(urlparse(url).query)
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+
+        referer = None
         headers_raw = qs.get("headers", [None])[0]
         if headers_raw:
             h = json.loads(headers_raw)
             referer = h.get("referer") or h.get("origin")
-            if referer:
-                return url, referer
+
+        host = qs.get("host", [None])[0]
+        if host:
+            path = unquote(parsed.path.replace("/proxy", "", 1))
+            url = host + path
+
+        return url, referer or "https://vidlink.pro/"
     except Exception:
-        pass
-    return url, "https://vidlink.pro/"
+        return url, "https://vidlink.pro/"
 
 
 def get_mpv_props(sock_path):
