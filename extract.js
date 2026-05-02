@@ -44,7 +44,7 @@ function cookiesToNetscape(cookies) {
   const page = await context.newPage();
   let found = null;
 
-  page.on('request', request => {
+  context.on('request', request => {
     if (found) return;
     const url = request.url();
     if (isVideoUrl(url) && !isSkippable(url)) {

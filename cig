@@ -133,37 +133,11 @@ def pick(options, label_fn, header=""):
 # --- Stream extraction ---
 
 def get_player_urls(tmdb_id, season, episode):
-    session = requests.Session()
-
-    # provider 1: vidlink.pro — autoplay, no click needed
     yield f"https://vidlink.pro/tv/{tmdb_id}/{season}/{episode}"
-
-    # provider 2: vidsrc.me — cloudnestra hash directly in page
-    try:
-        url = f"https://vidsrc.me/embed/tv?tmdb={tmdb_id}&season={season}&episode={episode}"
-        r = session.get(url, headers={**HEADERS, "Referer": "https://vidsrc.me/"}, timeout=10)
-        hashes = re.findall(r'cloudnestra\.com/rcp/([A-Za-z0-9_\-]+)', r.text)
-        for h in hashes[:2]:
-            yield f"https://cloudnestra.com/rcp/{h}"
-    except requests.RequestException:
-        pass
-
-    # provider 3: vidsrc.to → vsembed.ru → cloudnestra
-    try:
-        embed_url = f"https://vidsrc.to/embed/tv/{tmdb_id}/{season}/{episode}"
-        r = session.get(embed_url, headers={**HEADERS, "Referer": "https://vidsrc.to/"}, timeout=10)
-        srcs = re.findall(r'src="((?:https?:)?//vsembed\.ru/embed/[^"]+)"', r.text)
-        for src in srcs:
-            iframe_url = "https:" + src if src.startswith("//") else src
-            try:
-                r2 = session.get(iframe_url, headers={**HEADERS, "Referer": embed_url}, timeout=10)
-                hashes = re.findall(r'data-hash="([^"]+)"', r2.text)
-                for h in hashes[:2]:
-                    yield f"https://cloudnestra.com/rcp/{h}"
-            except requests.RequestException:
-                continue
-    except requests.RequestException:
-        pass
+    yield f"https://vidsrc.xyz/embed/tv?tmdb={tmdb_id}&season={season}&episode={episode}"
+    yield f"https://embed.su/embed/tv/{tmdb_id}/{season}/{episode}"
+    yield f"https://vidsrc.me/embed/tv?tmdb={tmdb_id}&season={season}&episode={episode}"
+    yield f"https://vidsrc.to/embed/tv/{tmdb_id}/{season}/{episode}"
 
 
 def extract_stream(player_url):
