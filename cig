@@ -341,12 +341,54 @@ def save_sub_sync(tmdb_id, sub_speed, sub_delay):
     HISTORY_FILE.write_text(json.dumps(history, indent=2))
 
 
+def fetch_local_playlist(cdn_url, referer):
+    """Fetch master m3u8, select best sub-playlist, save to local file to bypass MIME type issues."""
+    hdrs = {
+        "Referer": referer,
+        "Origin": referer.rstrip("/"),
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
+    }
+    try:
+        master = requests.get(cdn_url, headers=hdrs, timeout=10).text
+        if "#EXT-X-STREAM-INF" in master:
+            best_url, best_bw = None, -1
+            lines = master.splitlines()
+            for i, line in enumerate(lines):
+                if line.startswith("#EXT-X-STREAM-INF:") and i + 1 < len(lines):
+                    m = re.search(r"BANDWIDTH=(\d+)", line)
+                    bw = int(m.group(1)) if m else 0
+                    if bw > best_bw:
+                        best_bw, best_url = bw, lines[i + 1].strip()
+            if best_url and best_url.startswith("http"):
+                content = requests.get(best_url, headers=hdrs, timeout=10).text
+            else:
+                content = master
+        else:
+            content = master
+
+        if not content.strip().startswith("#EXTM3U"):
+            return None
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".m3u8", delete=False, mode="w", encoding="utf-8")
+        tmp.write(content)
+        tmp.close()
+        return tmp.name
+    except Exception as e:
+        info(f"playlist fetch failed: {e}")
+        return None
+
+
 def play(stream_url, title, sub_file=None, cookie_file=None, sub_speed=1.0, sub_delay=0.0):
     print(f"\n\033[32m[cig] playing:\033[0m {title}\n")
 
     stream_url, referer = resolve_stream_url(stream_url)
     origin = referer.rstrip("/")
     sock_path = f"/tmp/cig_mpv_{os.getpid()}.socket"
+
+    local_playlist = fetch_local_playlist(stream_url, referer)
+    play_url = local_playlist if local_playlist else stream_url
+    if local_playlist:
+        info("playlist cached locally")
 
     cmd = [
         "mpv",
@@ -355,7 +397,6 @@ def play(stream_url, title, sub_file=None, cookie_file=None, sub_speed=1.0, sub_
         f"--http-header-fields=Origin: {origin},Referer: {referer}",
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36",
         "--slang=en",
-        "--hls-bitrate=max",
         "--no-ytdl",
         "--demuxer-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=5",
         f"--input-ipc-server={sock_path}",
@@ -370,7 +411,7 @@ def play(stream_url, title, sub_file=None, cookie_file=None, sub_speed=1.0, sub_
         cmd.append(f"--sub-file={sub_file}")
         speed_note = f" (speed={sub_speed:.4f})" if abs(sub_speed - 1.0) > 0.001 else ""
         info(f"english subtitles loaded{speed_note}")
-    cmd.append(stream_url)
+    cmd.append(play_url)
 
     last_props = {"sub-speed": sub_speed, "sub-delay": sub_delay}
     stop_monitor = threading.Event()
@@ -396,10 +437,12 @@ def play(stream_url, title, sub_file=None, cookie_file=None, sub_speed=1.0, sub_
     finally:
         stop_monitor.set()
         t.join(timeout=2)
-        try:
-            os.unlink(sock_path)
-        except OSError:
-            pass
+        for tmp in [sock_path, local_playlist]:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
     elapsed = time.time() - started
     return last_props["sub-speed"], last_props["sub-delay"], returncode, elapsed
